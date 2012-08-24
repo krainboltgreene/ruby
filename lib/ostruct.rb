@@ -1,11 +1,12 @@
 #
 # = ostruct.rb: OpenStruct implementation
 #
-# Author:: Yukihiro Matsumoto
-# Documentation:: Gavin Sinclair
+# Author:: Kurtis Rainbolt-Greene
+# Documentation:: Kurtis Rainbolt-Greene
 #
-# OpenStruct allows the creation of data objects with arbitrary attributes.
-# See OpenStruct for an example.
+# OpenStruct is an Class and Module (OpenStruct::M) that can be used to
+# create hash-like classes. Allowing you to create an object that can
+# dynamically accept accessors and behaves very much like a Hash.
 #
 
 #
@@ -14,50 +15,62 @@
 # accomplished by using Ruby's metaprogramming to define methods on the class
 # itself.
 #
+
+#
 # == Examples:
 #
 #   require 'ostruct'
 #
-#   person = OpenStruct.new
-#   person.name    = "John Smith"
-#   person.age     = 70
-#   person.pension = 300
+#   class Profile < OpenStruct
 #
-#   puts person.name     # -> "John Smith"
-#   puts person.age      # -> 70
-#   puts person.address  # -> nil
+#   end
+#
+#   person = Profile.new name: "John Smith"
+#   person.age = 70
+#
+#   puts person.name     # => "John Smith"
+#   puts person.age      # => 70
+#   puts person.dump     # => { :name => "John Smith", :age => 70 }
+#
+
 #
 # An OpenStruct employs a Hash internally to store the methods and values and
 # can even be initialized with one:
 #
-#   australia = OpenStruct.new(:country => "Australia", :population => 20_000_000)
-#   p australia   # -> <OpenStruct country="Australia" population=20000000>
+#   australia = OpenStruct.new country: "Australia", population: 20_000_000
+#   puts australia.inspect # => <OpenStruct country="Australia", population=20000000>
+#
+
 #
 # Hash keys with spaces or characters that would normally not be able to use for
 # method calls (e.g. ()[]*) will not be immediately available on the
 # OpenStruct object as a method for retrieval or assignment, but can be still be
 # reached through the Object#send method.
 #
-#   measurements = OpenStruct.new("length (in inches)" => 24)
-#   measurements.send("length (in inches)")  # -> 24
+#   measurements = OpenStruct.new "length (in inches)" => 24
+#   measurements.send "length (in inches)"  # => 24
 #
-#   data_point = OpenStruct.new(:queued? => true)
-#   data_point.queued?                       # -> true
-#   data_point.send("queued?=",false)
-#   data_point.queued?                       # -> false
+#   data_point = OpenStruct.new :queued? => true
+#   data_point.queued?                       # => true
+#   data_point.send "queued?=", false
+#   data_point.queued?                       # => false
+#
+
 #
 # Removing the presence of a method requires the execution the delete_field
-# method as setting the property value to +nil+ will not remove the method.
+# or delete (like a hash) method as setting the property value to +nil+
+# will not remove the method.
 #
-#   first_pet = OpenStruct.new(:name => 'Rowdy', :owner => 'John Smith')
+#   first_pet = OpenStruct.new :name => 'Rowdy', :owner => 'John Smith'
 #   first_pet.owner = nil
-#   second_pet = OpenStruct.new(:name => 'Rowdy')
+#   second_pet = OpenStruct.new :name => 'Rowdy'
 #
 #   first_pet == second_pet   # -> false
 #
 #   first_pet.delete_field(:owner)
 #   first_pet == second_pet   # -> true
 #
+
 #
 # == Implementation:
 #
@@ -65,186 +78,165 @@
 # the necessary methods for properties. This is accomplished through the method
 # method_missing and define_method.
 #
+
+#
 # This should be a consideration if there is a concern about the performance of
 # the objects that are created, as there is much more overhead in the setting
 # of these properties compared to using a Hash or a Struct.
 #
 class OpenStruct
-  #
-  # Creates a new OpenStruct object.  By default, the resulting OpenStruct
-  # object will have no attributes.
-  #
-  # The optional +hash+, if given, will generate attributes and values.
-  # For example:
-  #
-  #   require 'ostruct'
-  #   hash = { "country" => "Australia", :population => 20_000_000 }
-  #   data = OpenStruct.new(hash)
-  #
-  #   p data        # -> <OpenStruct country="Australia" population=20000000>
-  #
-  def initialize(hash=nil)
-    @table = {}
-    if hash
-      for k,v in hash
-        @table[k.to_sym] = v
-        new_ostruct_member(k)
+  # We include all of the OpenStruct::M Module in order to give OpenStruct
+  # the same behavior as OpenStruct. It's better, however, to simply
+  # include OpenStruct::M into your own class.
+  include OpenStruct::M
+  module M
+    ThreadKey = :__inspect_ostruct_ids__ # :nodoc:
+    attr_reader :table
+
+    # Create a new field for each of the key/value pairs passed.
+    # By default the resulting OpenStruct object will have no
+    # attributes. If no pairs are passed avoid any work.
+    #
+    #    require 'ostruct'
+    #    hash = { "country" => "Australia", :population => 20_000_000 }
+    #    data = OpenStruct.new hash
+    #
+    #    p data # => <OpenStruct country="Australia" population=20000000>
+    #
+    # If you happen to be inheriting then you can define your own
+    # @table ivar before the `super()` call. OpenStruct will respect
+    # your @table.
+    #
+    def initialize(pairs = {})
+      @table ||= {}
+      for key, value in pairs
+        __new_field__ key, value
+      end unless pairs.empty?
+    end
+
+    # This is the `load()` method, which works like initialize in that it
+    # will create new fields for each pair passed. Notice that it
+    # also is a double-underbar method, making it really hard to
+    # overwrite. It also mimics the behavior of a Hash#merge and
+    # Hash#merge!
+    def __load__(pairs)
+      for key, value in pairs
+        __new_field__ key, value
+      end unless pairs.empty?
+    end
+    alias_method :marshal_load, :__load__
+    alias_method :load, :__load__
+    alias_method :merge, :__load__
+    alias_method :merge!, :__load__
+
+    # The `dump()` takes the table and out puts in it's natural hash
+    # format. In addition you can pass along a specific set of keys to
+    # dump.
+    def __dump__(*keys)
+      keys.empty? ? table : __dump_specific__(keys)
+    end
+    alias_method :marshal_dump, :__dump__
+    alias_method :dump, :__dump__
+    alias_method :to_hash, :__dump__
+
+    def __inspect__
+      "#<#{self.class}#{__dump_inspect__}>"
+    end
+    alias_method :inspect, :__inspect__
+    alias_method :to_s, :__inspect__
+
+    # The delete_field() method removes a key/value pair on the @table
+    # and on the singleton class. It also mimics the Hash#delete method.
+    def __delete_field__(key)
+      singleton_class.send :remove_method, key
+      singleton_class.send :remove_method, :"#{key}="
+      @table.delete key
+    end
+    alias_method :delete_field, :__delete_field__
+    alias_method :delete, :__delete_field__
+
+    # The `method_missing()` method catches all non-tabled method calls.
+    # The OpenStruct object will return two specific errors depending on
+    # the call.
+    def method_missing(method, *args)
+      name = method.to_s
+      case
+      when !name.include?('=')
+        # This is to catch non-assignment methods
+        message = "undefined method `#{name}' for #{self}"
+        raise NoMethodError, message, caller(1)
+      when args.size != 1
+        # This is to catch the []= method
+        message = "wrong number of arguments (#{args.size} for 1)"
+        raise ArgumentError, message, caller(1)
+      else
+        __new_field__ name.chomp!('='), args.first
       end
     end
-  end
 
-  # Duplicate an OpenStruct object members.
-  def initialize_copy(orig)
-    super
-    @table = @table.dup
-    @table.each_key{|key| new_ostruct_member(key)}
-  end
-
-  #
-  # Converts the OpenStruct to a hash with keys representing
-  # each attribute (as symbols) and their corresponding values
-  # Example:
-  #
-  #   require 'ostruct'
-  #   data = OpenStruct.new("country" => "Australia", :population => 20_000_000)
-  #   data.to_h   # => {:country => "Australia", :population => 20000000 }
-  #
-  def to_h
-    @table.dup
-  end
-
-  #
-  # Provides marshalling support for use by the Marshal library. Returning the
-  # underlying Hash table that contains the functions defined as the keys and
-  # the values assigned to them.
-  #
-  #    require 'ostruct'
-  #
-  #    person = OpenStruct.new
-  #    person.name = 'John Smith'
-  #    person.age  = 70
-  #
-  #    person.marshal_dump # => { :name => 'John Smith', :age => 70 }
-  #
-  def marshal_dump
-    @table
-  end
-
-  #
-  # Provides marshalling support for use by the Marshal library. Accepting
-  # a Hash of keys and values which will be used to populate the internal table
-  #
-  #    require 'ostruct'
-  #
-  #    event = OpenStruct.new
-  #    hash = { 'time' => Time.now, 'title' => 'Birthday Party' }
-  #    event.marshal_load(hash)
-  #    event.title # => 'Birthday Party'
-  #
-  def marshal_load(x)
-    @table = x
-    @table.each_key{|key| new_ostruct_member(key)}
-  end
-
-  #
-  # #modifiable is used internally to check if the OpenStruct is able to be
-  # modified before granting access to the internal Hash table to be modified.
-  #
-  def modifiable
-    begin
-      @modifiable = true
-    rescue
-      raise TypeError, "can't modify frozen #{self.class}", caller(3)
-    end
-    @table
-  end
-  protected :modifiable
-
-  #
-  # new_ostruct_member is used internally to defined properties on the
-  # OpenStruct. It does this by using the metaprogramming function
-  # define_method for both the getter method and the setter method.
-  #
-  def new_ostruct_member(name)
-    name = name.to_sym
-    unless self.respond_to?(name)
-      class << self; self; end.class_eval do
-        define_method(name) { @table[name] }
-        define_method("#{name}=") { |x| modifiable[name] = x }
+    def ==(object)
+      if object.respond_to? :table
+        table == object.table
+      else
+        false
       end
     end
-    name
-  end
 
-  def method_missing(mid, *args) # :nodoc:
-    mname = mid.id2name
-    len = args.length
-    if mname.chomp!('=') && mid != :[]=
-      if len != 1
-        raise ArgumentError, "wrong number of arguments (#{len} for 1)", caller(1)
+    def freeze
+      super
+      @table.freeze
+    end
+
+    private
+
+    def __dump_inspect__
+      __create_id_list__
+      unless __id_exists_in_id_list?
+        __add_id_to_id_list__
+        string = __dump__.any? ? " #{__dump_string__.join ', '}" : ""
+      else
+        __remove_last_id_from_id_list__
+        string = __dump__.any? ? " ..." : ""
       end
-      modifiable[new_ostruct_member(mname)] = args[0]
-    elsif len == 0 && mid != :[]
-      @table[mid]
-    else
-      raise NoMethodError, "undefined method `#{mid}' for #{self}", caller(1)
-    end
-  end
-
-  #
-  # Remove the named field from the object. Returns the value that the field
-  # contained if it was defined.
-  #
-  #   require 'ostruct'
-  #
-  #   person = OpenStruct.new('name' => 'John Smith', 'age' => 70)
-  #
-  #   person.delete_field('name')  # => 'John Smith'
-  #
-  def delete_field(name)
-    sym = name.to_sym
-    singleton_class.__send__(:remove_method, sym, "#{name}=")
-    @table.delete sym
-  end
-
-  InspectKey = :__inspect_key__ # :nodoc:
-
-  #
-  # Returns a string containing a detailed summary of the keys and values.
-  #
-  def inspect
-    str = "#<#{self.class}"
-
-    ids = (Thread.current[InspectKey] ||= [])
-    if ids.include?(object_id)
-      return str << ' ...>'
+      __remove_last_id_from_id_list__
+      string
     end
 
-    ids << object_id
-    begin
-      first = true
-      for k,v in @table
-        str << "," unless first
-        first = false
-        str << " #{k}=#{v.inspect}"
+    def __define_accessor__(key, value)
+      define_singleton_method(key) { @table[key] }
+      define_singleton_method(:"#{key}=") { |v| @table[key] = v }
+      { key => value }.freeze
+    end
+
+    def __new_field__(key, value)
+      table.merge! __define_accessor__ key.to_sym, value
+    end
+
+    def __dump_specific__(keys)
+      @table.keep_if { |key| keys.include? key }
+    end
+
+    def __dump_string__
+      __dump__.map do |key, value|
+        "#{key}=#{value.inspect}"
       end
-      return str << '>'
-    ensure
-      ids.pop
     end
-  end
-  alias :to_s :inspect
 
-  attr_reader :table # :nodoc:
-  protected :table
+    def __add_id_to_id_list__
+      Thread.current[ThreadKey] << object_id
+    end
 
-  #
-  # Compares this object and +other+ for equality.  An OpenStruct is equal to
-  # +other+ when +other+ is an OpenStruct and the two object's Hash tables are
-  # equal.
-  #
-  def ==(other)
-    return false unless(other.kind_of?(OpenStruct))
-    return @table == other.table
+    def __create_id_list__
+      Thread.current[ThreadKey] ||= []
+    end
+
+    def __id_exists_in_id_list?
+      Thread.current[ThreadKey].include?(object_id)
+    end
+
+    def __remove_last_id_from_id_list__
+      Thread.current[ThreadKey].pop
+    end
   end
 end
+
